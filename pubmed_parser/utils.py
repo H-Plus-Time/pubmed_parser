@@ -1,10 +1,15 @@
+import calendar
 import collections
+from time import strptime
+from six import string_types
 from lxml import etree
 from itertools import chain
-from six import string_types
 
 
 def read_xml(path):
+    """
+    Parse tree from given XML path
+    """
     try:
         tree = etree.parse(path)
     except:
@@ -14,25 +19,6 @@ def read_xml(path):
             print("Error: it was not able to read a path, a file-like object, or a string as an XML")
             raise
     return tree
-
-
-def join(l):
-    """
-    Join list with single space
-    """
-    return ' '.join(l)
-
-
-def flatten(l):
-    """
-    Flatten list into one dimensional
-    """
-    for el in l:
-        if isinstance(el, collections.Iterable) and not isinstance(el, string_types):
-            for sub in flatten(el):
-                yield sub
-        else:
-            yield el
 
 
 def stringify_children(node):
@@ -62,12 +48,24 @@ def stringify_affiliation_rec(node):
     Flatten and join list to string
     ref: http://stackoverflow.com/questions/2158395/flatten-an-irregular-list-of-lists-in-python
     """
-    parts = recur_children(node)
-    parts_flatten = list(flatten(parts))
+    parts = _recur_children(node)
+    parts_flatten = list(_flatten(parts))
     return ' '.join(parts_flatten).strip()
 
 
-def recur_children(node):
+def _flatten(l):
+    """
+    Flatten list into one dimensional
+    """
+    for el in l:
+        if isinstance(el, collections.Iterable) and not isinstance(el, string_types):
+            for sub in _flatten(el):
+                yield sub
+        else:
+            yield el
+
+
+def _recur_children(node):
     """
     Recursive through node to when it has multiple children
     """
@@ -76,16 +74,35 @@ def recur_children(node):
         return parts
     else:
         parts = ([node.text or ''] +
-                 [recur_children(c) for c in node.getchildren()] +
+                 [_recur_children(c) for c in node.getchildren()] +
                  [node.tail or ''])
         return parts
 
 
-def chunks(l, n):
+def month_or_day_formater(month_or_day):
     """
-    Yield successive n-sized chunks from l
-    Suppose we want to chunk all path list into smaller chunk
-    example: chunks(path_list, 10000)
+    Parameters
+    ----------
+    month_or_day: str or int
+        must be one of the following:
+            (i)  month: a three letter month abbreviation, e.g., 'Jan'.
+            (ii) day: an integer.
+
+    Returns
+    -------
+    numeric: str
+        a month of the form 'MM' or a day of the form 'DD'.
+        Note: returns None if:
+            (a) the input could not be mapped to a known month abbreviation OR
+            (b) the input was not an integer (i.e., a day).
     """
-    for i in xrange(0, len(l), n):
-        yield l[i:i+n]
+    if month_or_day.replace(".", "") in filter(None, calendar.month_abbr):
+        to_format = strptime(month_or_day.replace(".", ""),'%b').tm_mon
+    elif month_or_day.strip().isdigit() and "." not in str(month_or_day):
+        to_format = int(month_or_day.strip())
+    else:
+        return None
+
+    return ("0" if to_format < 10 else "") + str(to_format)
+
+

@@ -1,28 +1,33 @@
 import os
-import pandas as pd
 from lxml import etree
-from functools import partial
-from operator import is_not
 from lxml.etree import tostring
+from itertools import chain
 from .utils import *
+from unidecode import unidecode
 
 __all__ = [
     'list_xml_path',
     'parse_pubmed_xml',
     'parse_pubmed_paragraph',
     'parse_pubmed_references',
-    'parse_pubmed_caption',
-    'parse_pubmed_xml_to_df',
-    'pretty_print_xml',
+    'parse_pubmed_caption'
 ]
 
 
 def list_xml_path(path_dir):
     """
-    List full xml path under given directory `path_dir`
+    List full xml path under given directory
+
+    Parameters
+    ----------
+    path_dir: str, path to directory that contains xml or nxml file
+
+    Returns
+    -------
+    path_list: list, list of xml or nxml file from given path
     """
     fullpath = [os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(path_dir)) for f in fn]
-    path_list = [folder for folder in fullpath if os.path.splitext(folder)[-1] == ('.nxml' or '.xml')]
+    path_list = [folder for folder in fullpath if os.path.splitext(folder)[-1] in ('.nxml', '.xml')]
     return path_list
 
 
@@ -33,7 +38,7 @@ def zip_author(author):
     [first_name, last_name, [key1, key2]]
     return [[first_name, last_name, key1], [first_name, last_name, key2]] instead
     """
-    author_zipped = list(zip([[author[0], author[1]]]*len(author[-1]), author[-1]))
+    author_zipped = list(zip([[author[0], author[1]]] * len(author[-1]), author[-1]))
     return list(map(lambda x: x[0] + [x[-1]], author_zipped))
 
 
@@ -45,16 +50,27 @@ def flatten_zip_author(author_list):
     return list(chain.from_iterable(author_zipped_list))
 
 
-def pretty_print_xml(path, save_path=None):
+def parse_article_meta(tree):
     """
-    Given a XML path, file-like, or string, print a pretty xml version of it
+    Parse PMID, PMC and DOI from given article tree
     """
-    tree = read_xml(path)
+    article_meta = tree.find('//article-meta')
+    pmid_node = article_meta.find('article-id[@pub-id-type="pmid"]')
+    pmc_node = article_meta.find('article-id[@pub-id-type="pmc"]')
+    pub_id_node = article_meta.find('article-id[@pub-id-type="publisher-id"]')
+    doi_node = article_meta.find('article-id[@pub-id-type="doi"]')
 
-    if save_path:
-        tree.write(save_path, pretty_print=True) # save prerry print to xml file
+    pmid = pmid_node.text if pmid_node is not None else ''
+    pmc = pmc_node.text if pmc_node is not None else ''
+    pub_id = pub_id_node.text if pub_id_node is not None else ''
+    doi = doi_node.text if doi_node is not None else ''
 
-    print(tostring(tree, pretty_print=True))
+    dict_article_meta = {'pmid': pmid,
+                         'pmc': pmc,
+                         'doi': doi,
+                         'publisher_id': pub_id}
+
+    return dict_article_meta
 
 
 def parse_pubmed_xml(path, include_path=False):
@@ -64,77 +80,85 @@ def parse_pubmed_xml(path, include_path=False):
     """
     tree = read_xml(path)
 
-    try:
-        title = ' '.join([x for x in tree.xpath('//title-group/article-title')[0].itertext()]).replace('\n', ' ')
-        sub_title = ' '.join(tree.xpath('//title-group/subtitle/text()')).replace('\n', ' ').replace('\t', ' ')
-        full_title = title + ' ' + sub_title
-    except:
+    tree_title = tree.find('//title-group/article-title')
+    if tree_title is not None:
+        title = [t for t in tree_title.itertext()]
+        sub_title = tree.xpath('//title-group/subtitle/text()')
+        title.extend(sub_title)
+        title = [t.replace('\n', ' ').replace('\t', ' ') for t in title]
+        full_title = ' '.join(title)
+    else:
         full_title = ''
+
     try:
-        abstract = ' '.join(tree.xpath('//abstract//text()'))
+        abstracts = list()
+        abstract_tree = tree.findall('//abstract')
+        for a in abstract_tree:
+            for t in a.itertext():
+                text = t.replace('\n', ' ').replace('\t', ' ').strip()
+                abstracts.append(text)
+        abstract = ' '.join(abstracts)
     except:
         abstract = ''
-    try:
-        journal_title = tree.xpath('//journal-title-group/journal-title')[0].text
-    except:
-        try:
-            journal_title = tree.xpath('/article/front/journal-meta/journal-title/text()')[0]
-        except:
-            journal_title = ''
-    try:
-        pmid = tree.xpath('//article-meta/article-id[@pub-id-type="pmid"]')[0].text
-    except:
-        pmid = ''
-    try:
-        pmc = tree.xpath('//article-meta/article-id[@pub-id-type="pmc"]')[0].text
-    except:
-        pmc = ''
-    try:
-        pub_id = tree.xpath('//article-meta/article-id[@pub-id-type="publisher-id"]')[0].text
-    except:
-        pub_id = ''
-    try:
-        pub_year = tree.xpath('//pub-date/year/text()')[0]
-    except:
-        pub_year = ''
-    try:
-        subjects = ','.join(tree.xpath('//article-categories//subj-group//text()'))
-    except:
+
+    journal_node = tree.findall('//journal-title')
+    if journal_node is not None:
+        journal = ' '.join([j.text for j in journal_node])
+    else:
+        journal = ''
+
+    dict_article_meta = parse_article_meta(tree)
+    pub_year_node = tree.find('//pub-date/year')
+    pub_year = pub_year_node.text if pub_year_node is not None else ''
+
+    subjects_node = tree.findall('//article-categories//subj-group/subject')
+    subjects = list()
+    if subjects_node is not None:
+        for s in subjects_node:
+            subject = ' '.join([s_.strip() for s_ in s.itertext()]).strip()
+            subjects.append(subject)
+        subjects = '; '.join(subjects)
+    else:
         subjects = ''
 
     # create affiliation dictionary
-    aff_id = tree.xpath('//aff[@id]/@id')
-    if len(aff_id) == 0:
-        aff_id = ['']  # replace id with empty list
+    affil_id = tree.xpath('//aff[@id]/@id')
+    if len(affil_id) > 0:
+        affil_id = list(map(str, affil_id))
+    else:
+        affil_id = ['']  # replace id with empty list
 
-    aff_name = tree.xpath('//aff[@id]')
-    aff_name_list = list()
-    for node in aff_name:
-        aff_name_list.append(stringify_affiliation_rec(node))
-    aff_name_list = list(map(lambda x: x.strip().replace('\n', ' '), aff_name_list))
-    affiliation_list = [list((a, n)) for (a, n) in zip(aff_id, aff_name_list)]
+    affil_name = tree.xpath('//aff[@id]')
+    affil_name_list = list()
+    for e in affil_name:
+        name = stringify_affiliation_rec(e)
+        name = name.strip().replace('\n', ' ')
+        affil_name_list.append(name)
+    affiliation_list = [[idx, name] for idx, name in zip(affil_id, affil_name_list)]
 
     tree_author = tree.xpath('//contrib-group/contrib[@contrib-type="author"]')
-
     author_list = list()
-    for el in tree_author:
-        el0 = el.findall('xref[@ref-type="aff"]')
+    for author in tree_author:
+        author_aff = author.findall('xref[@ref-type="aff"]')
         try:
-            rid_list = [tmp.attrib['rid'] for tmp in el0]
+            ref_id_list = [str(a.attrib['rid']) for a in author_aff]
         except:
-            rid_list = ''
+            ref_id_list = ''
         try:
-            author_list.append([el.find('name/surname').text, el.find('name/given-names').text, rid_list])
+            author_list.append([author.find('name/surname').text,
+                                author.find('name/given-names').text,
+                                ref_id_list])
         except:
-            author_list.append(['', '', rid_list])
+            author_list.append(['', '', ref_id_list])
     author_list = flatten_zip_author(author_list)
 
     dict_out = {'full_title': full_title.strip(),
                 'abstract': abstract,
-                'journal_title': journal_title,
-                'pmid': pmid,
-                'pmc': pmc,
-                'publisher_id': pub_id,
+                'journal': journal,
+                'pmid': dict_article_meta['pmid'],
+                'pmc': dict_article_meta['pmc'],
+                'doi': dict_article_meta['doi'],
+                'publisher_id': dict_article_meta['publisher_id'],
                 'author_list': author_list,
                 'affiliation_list': affiliation_list,
                 'publication_year': pub_year,
@@ -144,168 +168,116 @@ def parse_pubmed_xml(path, include_path=False):
     return dict_out
 
 
-def parse_pubmed_xml_to_df(paths, include_path=False, remove_abstract=False):
+def parse_pubmed_references(path):
     """
-    Given list of xml paths, return parsed DataFrame
-
-    Parameters
-    ----------
-    path_list: list, list of xml paths
-    remove_abstract: boolean, if true, remove row of dataframe if parsed xml
-        contains empty abstract
-    include_path: boolean, if true, concat path to xml file when
-        constructing dataFrame
-
-    Return
-    ------
-    pm_docs_df: dataframe, dataframe of all parsed xml files
+    Given path to xml file, parse references articles
+    to list of dictionary
     """
-    pm_docs = list()
-    if isinstance(paths, string_types):
-        pm_docs = [parse_pubmed_xml(paths, include_path=include_path)] # in case providing single path
-    else:
-        # else for list of paths
-        for path in paths:
-            pm_dict = parse_pubmed_xml(path, include_path=include_path)
-            pm_docs.append(pm_dict)
-
-    pm_docs = filter(partial(is_not, None), pm_docs)  # remove None
-    pm_docs_df = pd.DataFrame(pm_docs) # turn to pandas DataFrame
-
-    # remove empty abstract
-    if remove_abstract:
-        pm_docs_df = pm_docs_df[pm_docs_df.abstract != ''].reset_index().drop('index', axis=1)
-
-    return pm_docs_df
-
-
-def parse_references(tree):
-    """
-    Give a tree as an input,
-    parse it to dictionary if ref-id and cited PMID
-    """
-    try:
-        pmid = tree.xpath('//article-meta/article-id[@pub-id-type="pmid"]')[0].text
-    except:
-        pmid = ''
-    try:
-        pmc = tree.xpath('//article-meta/article-id[@pub-id-type="pmc"]')[0].text
-    except:
-        pmc = ''
+    tree = read_xml(path)
+    dict_article_meta = parse_article_meta(tree)
+    pmid = dict_article_meta['pmid']
+    pmc = dict_article_meta['pmc']
 
     references = tree.xpath('//ref-list/ref[@id]')
     dict_refs = list()
-    for r in references:
-        ref_id = r.attrib['id']
-        for rc in r:
-            if 'publication-type' in rc.attrib.keys():
-                if rc.attrib.values() is not None:
-                    journal_type = rc.attrib.values()[0]
+    for reference in references:
+        ref_id = reference.attrib['id']
+
+        if reference.find('mixed-citation') is not None:
+            ref = reference.find('mixed-citation')
+        elif reference.find('element-citation') is not None:
+            ref = reference.find('element-citation')
+        else:
+            ref = None
+
+        if ref is not None:
+            if 'publication-type' in ref.attrib.keys() and ref is not None:
+                if ref.attrib.values() is not None:
+                    journal_type = ref.attrib.values()[0]
                 else:
                     journal_type = ''
                 names = list()
-                if rc.find('name') is not None:
-                    for n in rc.findall('name'):
-                        name = join([t.text for t in n.getchildren()][::-1])
+                if ref.find('name') is not None:
+                    for n in ref.findall('name'):
+                        name = ' '.join([t.text for t in n.getchildren()][::-1])
                         names.append(name)
-                elif rc.find('person-group') is not None:
-                    for n in rc.find('person-group'):
-                        name = join(n.xpath('given-names/text()') + n.xpath('surname/text()'))
+                elif ref.find('person-group') is not None:
+                    for n in ref.find('person-group'):
+                        name = ' '.join(n.xpath('given-names/text()') + n.xpath('surname/text()'))
                         names.append(name)
-                try:
-                    article_title = rc.findall('article-title')[0].text
-                except:
+                if ref.find('article-title') is not None:
+                    article_title = stringify_children(ref.find('article-title')) or ''
+                    article_title = article_title.replace('\n', ' ').strip()
+                else:
+
                     article_title = ''
-                try:
-                    journal = rc.findall('source')[0].text
-                except:
+                if ref.find('source') is not None:
+                    journal = ref.find('source').text or ''
+                else:
                     journal = ''
-                try:
-                    pmid_cited = rc.findall('pub-id[@pub-id-type="pmid"]')[0].text
-                except:
+                if len(ref.findall('pub-id')) >= 1:
+                    for pubid in ref.findall('pub-id'):
+                        if 'doi' in pubid.attrib.values():
+                            doi_cited = pubid.text
+                        else:
+                            doi_cited = ''
+                        if 'pmid' in pubid.attrib.values():
+                            pmid_cited = pubid.text
+                        else:
+                            pmid_cited = ''
+                else:
+                    doi_cited = ''
                     pmid_cited = ''
-                dict_ref = {'ref_id': ref_id,
-                            'name': '; '.join(names),
-                            'article_title': article_title,
-                            'journal': journal,
-                            'journal_type': journal_type,
-                            'pmid': pmid,
+                dict_ref = {'pmid': pmid,
                             'pmc': pmc,
-                            'pmid_cited': pmid_cited}
+                            'ref_id': ref_id,
+                            'pmid_cited': pmid_cited,
+                            'doi_cited': doi_cited,
+                            'article_title': article_title,
+                            'name': '; '.join(names),
+                            'journal': journal,
+                            'journal_type': journal_type}
                 dict_refs.append(dict_ref)
+    if len(dict_refs) == 0:
+        dict_refs = None
     return dict_refs
 
 
-def parse_pubmed_references(path):
-    """
-    Given path to xml file, parse all references
-    from that PMID
-    """
-    tree = read_xml(path)
-    dict_refs = parse_references(tree)
-    return dict_refs
-
-
-def parse_paragraph(tree, dict_refs):
+def parse_pubmed_paragraph(path, all_paragraph=False):
     """
     Give tree and reference dictionary
-    return dictionary of paragraph
+    return dictionary of referenced paragraph, section that it belongs to,
+    and its cited PMID
     """
-    try:
-        pmid = tree.xpath('//article-meta/article-id[@pub-id-type="pmid"]')[0].text
-    except:
-        pmid = ''
-    try:
-        pmc = tree.xpath('//article-meta/article-id[@pub-id-type="pmc"]')[0].text
-    except:
-        pmc = ''
+    tree = read_xml(path)
+    dict_article_meta = parse_article_meta(tree)
+    pmid = dict_article_meta['pmid']
+    pmc = dict_article_meta['pmc']
 
     paragraphs = tree.xpath('//body//p')
     dict_pars = list()
-    for p in paragraphs:
-        try:
-            text = join(p.xpath('text()')) # text of the paragraph
-        except:
-            text = ''
-        try:
-            section = p.xpath('../title/text()')[0]
-        except:
+    for paragraph in paragraphs:
+        paragraph_text = stringify_children(paragraph)
+        section = paragraph.find('../title')
+        if section is not None:
+            section = stringify_children(section).strip()
+        else:
             section = ''
 
-        # find the reference codes used in the paragraphs, can be compared with bibliogrpahy
-        try:
-            par_bib_refs = p.findall('.//xref[@ref-type="bibr"]')
-            par_refs = list()
-            for r in par_bib_refs:
-                par_refs.append(r.xpath('@rid')[0])
-        except:
-            par_refs = ''
+        ref_ids = list()
+        for reference in paragraph.getchildren():
+            if 'rid' in reference.attrib.keys():
+                ref_id = reference.attrib['rid']
+                ref_ids.append(ref_id)
 
-        # search bibliography for PubMed ID's of referenced articles
-        try:
-            pm_ids = list()
-            for r in par_refs:
-                r_ref = list(filter(lambda ref: ref['ref_id'] == r, dict_refs))
-                if r_ref[0]['pmid'] != '':
-                    pm_ids.append(r_ref[0]['pmid'])
-        except:
-            pm_ids = list()
+        dict_par = {'pmc': pmc,
+                    'pmid': pmid,
+                    'reference_ids': ref_ids,
+                    'section': section,
+                    'text': paragraph_text}
+        if len(ref_ids) >= 1 or all_paragraph:
+            dict_pars.append(dict_par)
 
-        dict_par = {'pmc': pmc, 'pmid': pmid, 'text': text,
-                    'references': par_refs, 'ref_pmids': pm_ids,
-                    'section': section}
-        dict_pars.append(dict_par)
-    return dict_pars
-
-
-def parse_pubmed_paragraph(path, include_path=False):
-    """
-    Given single xml path, extract information from xml file
-    and return parsed xml file in dictionary format.
-    """
-    tree = read_xml(path)
-    dict_refs = parse_references(tree)
-    dict_pars = parse_paragraph(tree, dict_refs)
     return dict_pars
 
 
@@ -315,15 +287,9 @@ def parse_pubmed_caption(path):
     reference id back to that figure
     """
     tree = read_xml(path)
-
-    try:
-        pmid = tree.xpath('//article-meta/article-id[@pub-id-type="pmid"]')[0].text
-    except:
-        pmid = ''
-    try:
-        pmc = tree.xpath('//article-meta/article-id[@pub-id-type="pmc"]')[0].text
-    except:
-        pmc = ''
+    dict_article_meta = parse_article_meta(tree)
+    pmid = dict_article_meta['pmid']
+    pmc = dict_article_meta['pmc']
 
     figs = tree.findall('//fig')
     dict_captions = list()
@@ -332,7 +298,7 @@ def parse_pubmed_caption(path):
             fig_id = fig.attrib['id']
             fig_label = stringify_children(fig.find('label'))
             fig_captions = fig.find('caption').getchildren()
-            caption = join([stringify_children(c) for c in fig_captions])
+            caption = ' '.join([stringify_children(c) for c in fig_captions])
             graphic = fig.find('graphic')
             if graphic is not None:
                 graphic_ref = graphic.attrib.values()[0]
@@ -346,3 +312,86 @@ def parse_pubmed_caption(path):
     if not dict_captions:
         dict_captions = None
     return dict_captions
+
+
+def table_to_df(table_text):
+    """
+    Function to transform plain xml text to list of row values and
+    columns
+    """
+    table_tree = etree.fromstring(table_text)
+    columns = []
+    for tr in table_tree.xpath('thead/tr'):
+        for c in tr.getchildren():
+            columns.append(unidecode(stringify_children(c)))
+
+    row_values = []
+    len_rows = []
+    for tr in table_tree.findall('tbody/tr'):
+        es = tr.xpath('td')
+        row_value = [unidecode(stringify_children(e)) for e in es]
+        len_rows.append(len(es))
+        row_values.append(row_value)
+    if len(len_rows) >= 1:
+        len_row = max(set(len_rows), key=len_rows.count)
+        row_values = [r for r in row_values if len(r) == len_row] # remove row with different length
+        return columns, row_values
+    else:
+        return None, None
+
+
+def parse_pubmed_table(path, return_xml=True):
+    """
+    Parse table from given Pubmed Open-Access XML file
+    """
+    tree = read_xml(path)
+    dict_article_meta = parse_article_meta(tree)
+    pmid = dict_article_meta['pmid']
+    pmc = dict_article_meta['pmc']
+
+    # parse table
+    tables = tree.xpath('//body//sec//table-wrap')
+    table_dicts = list()
+    for table in tables:
+        if table.find('label') is not None:
+            label = unidecode(table.find('label').text or '')
+        else:
+            label = ''
+
+        # table caption
+        if table.find('caption/p') is not None:
+            caption_node = table.find('caption/p')
+        elif table.find('caption/title') is not None:
+            caption_node = table.find('caption/title')
+        else:
+            caption_node = None
+        if caption_node is not None:
+            caption = unidecode(stringify_children(caption_node).strip())
+        else:
+            caption = ''
+
+        # table content
+        if table.find('table') is not None:
+            table_tree = table.find('table')
+        elif table.find('alternatives/table') is not None:
+            table_tree = table.find('alternatives/table')
+        else:
+            table_tree = None
+
+        if table_tree is not None:
+            table_xml = etree.tostring(table_tree)
+            columns, row_values = table_to_df(table_xml)
+            if row_values is not None:
+                table_dict = {'pmid': pmid,
+                              'pmc': pmc,
+                              'label': label,
+                              'caption': caption,
+                              'table_columns': columns,
+                              'table_values': row_values}
+                if return_xml:
+                    table_dict['table_xml'] = table_xml
+                table_dicts.append(table_dict)
+    if len(table_dicts) >= 1:
+        return table_dicts
+    else:
+        return None
