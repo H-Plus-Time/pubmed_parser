@@ -14,7 +14,8 @@ def read_xml(path):
         tree = etree.parse(path)
     except:
         try:
-            tree = etree.fromstring(path)
+            root = etree.fromstring(path)
+            tree = etree.ElementTree(root)
         except Exception as e:
             print("Error: it was not able to read a path, a file-like object, or a string as an XML")
             raise
@@ -104,5 +105,3 @@ def month_or_day_formater(month_or_day):
         return None
 
     return ("0" if to_format < 10 else "") + str(to_format)
-
-
